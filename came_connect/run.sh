@@ -1,13 +1,15 @@
-#!/usr/bin/env sh
-set -e
+#!/usr/bin/with-contenv bashio
 
-if [ -f /data/options.json ]; then
-  CAME_CONNECT_CLIENT_ID=$(jq -r '.came_connect_client_id' /data/options.json)
-  CAME_CONNECT_CLIENT_SECRET=$(jq -r '.came_connect_client_secret' /data/options.json)
-  CAME_CONNECT_USERNAME=$(jq -r '.came_connect_username' /data/options.json)
-  CAME_CONNECT_PASSWORD=$(jq -r '.came_connect_password' /data/options.json)
-  export CAME_CONNECT_CLIENT_ID CAME_CONNECT_CLIENT_SECRET CAME_CONNECT_USERNAME CAME_CONNECT_PASSWORD
+export CLIENT_ID="$(bashio::config 'client_id')"
+export CLIENT_SECRET="$(bashio::config 'client_secret')"
+export USERNAME="$(bashio::config 'username')"
+export PASSWORD="$(bashio::config 'password')"
+export DEVICE_ID="$(bashio::config 'device_id')"
+
+if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ] || [ -z "$USERNAME" ] || [ -z "$PASSWORD" ] || [ -z "$DEVICE_ID" ]; then
+  bashio::log.fatal "Missing required configuration values."
+  exit 1
 fi
 
-exec uvicorn app.main:app --host 0.0.0.0 --port 8080
-
+cd /app
+exec uvicorn app:app --host 0.0.0.0 --port 8080
