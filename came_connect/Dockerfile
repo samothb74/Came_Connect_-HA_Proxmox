@@ -14,4 +14,4 @@ RUN chmod a+x /app/run.sh
 
 ENV PATH="/opt/venv/bin:$PATH"
 
-CMD [ "/app/run.sh" ]
+CMD ["/app/run.sh"]
