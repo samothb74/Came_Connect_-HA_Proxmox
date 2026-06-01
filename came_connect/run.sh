@@ -12,4 +12,6 @@ if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ] || [ -z "$USERNAME" ] || [ -z 
 fi
 
 cd /app
-exec uvicorn app:app --host 0.0.0.0 --port 9002
+set -e
+
+exec /opt/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8099
