@@ -14,4 +14,10 @@ fi
 set -e
 
 cd /app
-exec /opt/venv/bin/python -m uvicorn came_connect.main:app --host 0.0.0.0 --port 9002
+export PYTHONPATH=/app
+
+echo "PWD=$(pwd)"
+echo "Listing /app:"
+ls -la /app
+
+exec /opt/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 9002
