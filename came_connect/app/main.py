@@ -397,8 +397,25 @@ def exec_command(device_id: int, command_id: int):
 
 @app.get("/debug/token")
 def debug_token():
-    access, base = ensure_token()
-    return {"ok": True, "base": base, "access_token_present": bool(access)}
+    try:
+        access, base = ensure_token()
+        return {
+            "ok": True,
+            "base": base,
+            "access_token_present": bool(access)
+        }
+    except HTTPException as e:
+        return {
+            "ok": False,
+            "status_code": e.status_code,
+            "detail": e.detail
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "type": type(e).__name__
+        }
 
 @app.get("/debug/token_detail")
 def token_detail():
