@@ -10,7 +10,7 @@ from typing import Tuple, Dict, Any
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
-
+from __future__ import annotations
 # ---- Config ----
 CLIENT_ID = os.getenv("CAME_CONNECT_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CAME_CONNECT_CLIENT_SECRET", "")
