@@ -69,6 +69,7 @@ def fetch_token() -> Dict[str, Any]:
 
     # Let's try auth-code and token on both base URLs
     last_err = None
+    errors = []
     for base in API_BASE_CANDIDATES:
         try:
             with httpx.Client(timeout=30.0, follow_redirects=True) as s:
