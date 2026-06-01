@@ -22,7 +22,7 @@ API_BASE_CANDIDATES = [
 ]
 
 # Endpoint OAuth (auth.cameconnect.net) – pris du custom component
-AUTH_BASE = "https://auth.cameconnect.net/oauth/token"
+AUTH_BASE = "https://app.cameconnect.net/api/oauth/token"
 
 # URI de redirection tel que documenté dans sdeagh
 REDIRECT_URI = "https://app.cameconnect.net/role"
