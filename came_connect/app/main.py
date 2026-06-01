@@ -8,7 +8,8 @@ import time
 from typing import Tuple, Dict, Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 # ---- Config ----
 CLIENT_ID = os.getenv("CAME_CONNECT_CLIENT_ID", "")
@@ -16,21 +17,22 @@ CLIENT_SECRET = os.getenv("CAME_CONNECT_CLIENT_SECRET", "")
 USERNAME = os.getenv("CAME_CONNECT_USERNAME", "")
 PASSWORD = os.getenv("CAME_CONNECT_PASSWORD", "")
 
-# Base API pour les commandes/statuts
 API_BASE_CANDIDATES = [
     "https://app.cameconnect.net/api/evo/v1",
 ]
 
-# Endpoint OAuth (auth.cameconnect.net) – pris du custom component
-AUTH_BASE = "https://app.cameconnect.net/api/oauth/token"
-
-# URI de redirection tel que documenté dans sdeagh
-REDIRECT_URI = "https://app.cameconnect.net/role"
-
+APP_BASE = "https://app.cameconnect.net"
+AUTH_AUTHORIZE_URL = f"{APP_BASE}/api/oauth/auth-code"
+AUTH_TOKEN_URL = f"{APP_BASE}/api/oauth/token"
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://192.168.1.104:9002").rstrip("/")
+REDIRECT_URI = f"{PUBLIC_BASE_URL}/auth/callback"
 TOKEN_PATH = "/data/token.json"
 HTTP_TIMEOUT = 30.0
+PKCE_MAX_AGE_SECONDS = 600
 
-app = FastAPI(title="Came Connect Proxy", version="0.2.1")
+app = FastAPI(title="Came Connect Proxy", version="0.3.0")
+
+PKCE_STORE: Dict[str, Dict[str, Any]] = {}
 
 
 # ---- Utility ----
@@ -39,7 +41,7 @@ def _b64url(data: bytes) -> str:
 
 
 def _pkce_pair() -> Tuple[str, str]:
-    verifier = _b64url(secrets.token_bytes(32)).replace("-", "").replace("_", "")
+    verifier = _b64url(secrets.token_bytes(48))
     challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
     return verifier, challenge
 
@@ -69,69 +71,25 @@ def token_valid(tok: Dict[str, Any] | None) -> bool:
     return bool(tok and tok.get("access_token"))
 
 
-def _safe_json(resp: httpx.Response):
-    try:
-        return resp.json()
-    except Exception:
-        return None
+def cleanup_pkce_store(max_age_seconds: int = PKCE_MAX_AGE_SECONDS) -> None:
+    now = time.time()
+    expired = [k for k, v in PKCE_STORE.items() if now - v.get("created_at", 0) > max_age_seconds]
+    for k in expired:
+        PKCE_STORE.pop(k, None)
 
 
 def fetch_token() -> Dict[str, Any]:
-    """
-    Obtenir un access_token via grant_type=password sur auth.cameconnect.net,
-    en copiant le flow utilisé par sdeagh/yashijoe.
-    """
-    if not all([CLIENT_ID, CLIENT_SECRET, USERNAME, PASSWORD]):
-        raise HTTPException(
-            status_code=500,
-            detail="Configuration manquante (CLIENT_ID, CLIENT_SECRET, USERNAME, PASSWORD)."
-        )
-
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-        "Authorization": _basic_auth(CLIENT_ID, CLIENT_SECRET),
-    }
-
-    # Body aligné sur le custom component : grant_type=password
-    body = {
-        "grant_type": "password",
-        "username": USERNAME,
-        "password": PASSWORD,
-        "scope": "openid profile offline_access",
-    }
-
-    try:
-        with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True) as s:
-            r = s.post(AUTH_BASE, data=body, headers=headers)
-
-        if r.status_code != 200:
-            # On renvoie le contenu pour debug, comme dans le custom component
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "message": "OAuth failed (token)",
-                    "status": r.status_code,
-                    "body": r.text[:1000],
-                },
-            )
-
-        tok = r.json()
-        # Optionnel, mais pratique pour debug
-        tok["_auth_base"] = AUTH_BASE
-        save_token(tok)
+    tok = load_token()
+    if tok and tok.get("access_token"):
         return tok
+    raise HTTPException(
+        status_code=401,
+        detail={
+            "message": "No token stored yet",
+            "action": f"Open {PUBLIC_BASE_URL}/auth/start in a browser to authenticate with CAME"
+        },
+    )
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "message": "OAuth exception",
-                "error": str(e),
-                "type": type(e).__name__,
-            },
-        )
 
 def ensure_token() -> Tuple[str, str]:
     tok = load_token()
@@ -149,15 +107,6 @@ def _request_with_refresh(method: str, url: str, payload=None):
             r = s.post(url, headers=headers, json=payload)
         else:
             r = s.get(url, headers=headers)
-
-        if r.status_code == 401:
-            fetch_token()
-            access, _ = ensure_token()
-            headers["Authorization"] = f"Bearer {access}"
-            if method.upper() == "POST":
-                r = s.post(url, headers=headers, json=payload)
-            else:
-                r = s.get(url, headers=headers)
 
     return r
 
@@ -229,10 +178,110 @@ def _decode_maneuvers_from_states(states: list[dict]) -> int | None:
         return None
 
 
+# ---- PKCE OAuth flow ----
+@app.get("/auth/start")
+def auth_start():
+    if not CLIENT_ID or not CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="Missing client credentials")
+
+    cleanup_pkce_store()
+
+    state = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(16)
+    code_verifier, code_challenge = _pkce_pair()
+
+    PKCE_STORE[state] = {
+        "code_verifier": code_verifier,
+        "nonce": nonce,
+        "created_at": time.time(),
+    }
+
+    params = {
+        "client_id": CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": REDIRECT_URI,
+        "state": state,
+        "nonce": nonce,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+    }
+
+    url = httpx.URL(AUTH_AUTHORIZE_URL, params=params)
+    return RedirectResponse(str(url), status_code=302)
+
+
+@app.get("/auth/callback")
+def auth_callback(
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+):
+    if error:
+        raise HTTPException(status_code=502, detail={"message": "OAuth callback error", "error": error})
+
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Missing code or state")
+
+    ctx = PKCE_STORE.pop(state, None)
+    if not ctx:
+        raise HTTPException(status_code=400, detail="Invalid or expired state")
+
+    code_verifier = ctx["code_verifier"]
+
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        "Authorization": _basic_auth(CLIENT_ID, CLIENT_SECRET),
+    }
+
+    token_data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": REDIRECT_URI,
+        "code_verifier": code_verifier,
+        "client_id": CLIENT_ID,
+    }
+
+    try:
+        with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True) as s:
+            r = s.post(AUTH_TOKEN_URL, data=token_data, headers=headers)
+
+        if r.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "OAuth token exchange failed",
+                    "status": r.status_code,
+                    "body": r.text[:1000],
+                },
+            )
+
+        tok = r.json()
+        tok["_base"] = API_BASE_CANDIDATES[0]
+        tok["_redirect_uri"] = REDIRECT_URI
+        save_token(tok)
+
+        return HTMLResponse("""
+        <html>
+          <body style="font-family: sans-serif; padding: 2rem;">
+            <h1>Authentification CAME réussie</h1>
+            <p>Le token a été enregistré dans l'add-on. Tu peux revenir dans Home Assistant.</p>
+          </body>
+        </html>
+        """)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail={"message": "OAuth exception", "error": str(e), "type": type(e).__name__},
+        )
+
+
 # ---- API ----
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "redirect_uri": REDIRECT_URI}
 
 
 @app.get("/devices/{device_id}/commands")
@@ -378,18 +427,24 @@ def debug_token():
             "ok": True,
             "base": base,
             "access_token_present": bool(access),
+            "auth_start_url": f"{PUBLIC_BASE_URL}/auth/start",
+            "redirect_uri": REDIRECT_URI,
         }
     except HTTPException as e:
         return {
             "ok": False,
             "status_code": e.status_code,
             "detail": e.detail,
+            "auth_start_url": f"{PUBLIC_BASE_URL}/auth/start",
+            "redirect_uri": REDIRECT_URI,
         }
     except Exception as e:
         return {
             "ok": False,
             "error": str(e),
             "type": type(e).__name__,
+            "auth_start_url": f"{PUBLIC_BASE_URL}/auth/start",
+            "redirect_uri": REDIRECT_URI,
         }
 
 
@@ -416,16 +471,19 @@ def token_detail():
             "has_payload": bool(payload),
             "exp": exp,
             "expires_in_s": (exp - now) if exp else None,
+            "redirect_uri": REDIRECT_URI,
         }
     except HTTPException as e:
         return {
             "ok": False,
             "status_code": e.status_code,
             "detail": e.detail,
+            "redirect_uri": REDIRECT_URI,
         }
     except Exception as e:
         return {
             "ok": False,
             "error": str(e),
             "type": type(e).__name__,
+            "redirect_uri": REDIRECT_URI,
         }
