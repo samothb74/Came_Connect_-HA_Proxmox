@@ -18,7 +18,6 @@ PASSWORD = os.getenv("CAME_CONNECT_PASSWORD", "")
 # Let's try both app.\* and beta.\*
 API_BASE_CANDIDATES = [
     "https://app.cameconnect.net/api",
-    "https://beta.cameconnect.net/api",
 ]
 
 OAUTH_AUTH_CODE_SUFFIX = "/oauth/auth-code"
