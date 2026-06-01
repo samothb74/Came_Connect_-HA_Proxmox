@@ -17,10 +17,10 @@ USERNAME = os.getenv("CAME_CONNECT_USERNAME", "")
 PASSWORD = os.getenv("CAME_CONNECT_PASSWORD", "")
 
 API_BASE_CANDIDATES = [
-    "https://app.cameconnect.net/api/evo/v1",
+    "https://app.cameconnect.net/api",
 ]
 
-REDIRECT_URI = "https://beta.cameconnect.net/role"
+REDIRECT_URI = "https://app.cameconnect.net/role"
 OAUTH_AUTH_CODE_SUFFIX = "/oauth/auth-code"
 OAUTH_TOKEN_SUFFIX = "/oauth/token"
 TOKEN_PATH = "/data/token.json"
