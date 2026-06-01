@@ -1,6 +1,6 @@
 name: "Came Connect"
 description: "Local REST proxy for CAME Connect"
-version: "1.0.0"
+version: "1.0.1"
 slug: "came_connect"
 startup: application
 boot: auto
