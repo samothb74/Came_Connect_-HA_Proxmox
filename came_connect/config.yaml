@@ -12,7 +12,7 @@ arch:
 
 ports:
   9002/tcp: 9002
-@@ -17,11 +17,13 @@ options:
+options:
   client_secret: ""
   username: ""
   password: ""
