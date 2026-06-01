@@ -77,135 +77,61 @@ def _safe_json(resp: httpx.Response):
 
 
 def fetch_token() -> Dict[str, Any]:
+    """
+    Obtenir un access_token via grant_type=password sur auth.cameconnect.net,
+    en copiant le flow utilisé par sdeagh/yashijoe.
+    """
     if not all([CLIENT_ID, CLIENT_SECRET, USERNAME, PASSWORD]):
         raise HTTPException(
             status_code=500,
             detail="Configuration manquante (CLIENT_ID, CLIENT_SECRET, USERNAME, PASSWORD)."
         )
 
-    verifier, challenge = _pkce_pair()
     headers = {
         "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         "Authorization": _basic_auth(CLIENT_ID, CLIENT_SECRET),
     }
 
-    errors = []
+    # Body aligné sur le custom component : grant_type=password
+    body = {
+        "grant_type": "password",
+        "username": USERNAME,
+        "password": PASSWORD,
+        "scope": "openid profile offline_access",
+    }
 
-    for base in API_BASE_CANDIDATES:
-        try:
-            with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True) as s:
-                auth_code_body = (
-                    f"grant_type=authorization_code"
-                    f"&username={httpx.QueryParams({'u': USERNAME})['u']}"
-                    f"&password={httpx.QueryParams({'p': PASSWORD})['p']}"
-                    f"&client_id={httpx.QueryParams({'c': CLIENT_ID})['c']}"
-                )
+    try:
+        with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True) as s:
+            r = s.post(AUTH_BASE, data=body, headers=headers)
 
-                params = {
-                    "client_id": CLIENT_ID,
-                    "response_type": "code",
-                    "redirect_uri": REDIRECT_URI,
-                    "state": secrets.token_urlsafe(16),
-                    "nonce": secrets.token_urlsafe(8),
-                    "code_challenge": challenge,
-                    "code_challenge_method": "S256",
-                }
+        if r.status_code != 200:
+            # On renvoie le contenu pour debug, comme dans le custom component
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "OAuth failed (token)",
+                    "status": r.status_code,
+                    "body": r.text[:1000],
+                },
+            )
 
-                r = s.post(
-                    base + OAUTH_AUTH_CODE_SUFFIX,
-                    content=auth_code_body,
-                    headers=headers,
-                    params=params,
-                )
+        tok = r.json()
+        # Optionnel, mais pratique pour debug
+        tok["_auth_base"] = AUTH_BASE
+        save_token(tok)
+        return tok
 
-                if r.status_code != 200:
-                    errors.append({
-                        "stage": "auth-code-http",
-                        "base": base,
-                        "status": r.status_code,
-                        "body": r.text[:1000],
-                    })
-                    continue
-
-                data = _safe_json(r)
-                if not isinstance(data, dict):
-                    errors.append({
-                        "stage": "auth-code-json",
-                        "base": base,
-                        "status": r.status_code,
-                        "body": r.text[:1000],
-                    })
-                    continue
-
-                code = data.get("code") or data.get("authorization_code") or data.get("Code")
-                if not code:
-                    errors.append({
-                        "stage": "auth-code-no-code",
-                        "base": base,
-                        "json": data,
-                    })
-                    continue
-
-                token_data = {
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": REDIRECT_URI,
-                    "code_verifier": verifier,
-                }
-
-                tr = s.post(
-                    base + OAUTH_TOKEN_SUFFIX,
-                    data=token_data,
-                    headers=headers,
-                )
-
-                if tr.status_code != 200:
-                    errors.append({
-                        "stage": "token-http",
-                        "base": base,
-                        "status": tr.status_code,
-                        "body": tr.text[:1000],
-                    })
-                    continue
-
-                tok = _safe_json(tr)
-                if not isinstance(tok, dict):
-                    errors.append({
-                        "stage": "token-json",
-                        "base": base,
-                        "status": tr.status_code,
-                        "body": tr.text[:1000],
-                    })
-                    continue
-
-                tok["_base"] = base
-                save_token(tok)
-                return tok
-
-        except Exception as e:
-            errors.append({
-                "stage": "exception",
-                "base": base,
-                "type": type(e).__name__,
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "OAuth exception",
                 "error": str(e),
-            })
-
-    raise HTTPException(
-        status_code=502,
-        detail={
-            "message": "OAuth failed",
-            "errors": errors,
-            "config": {
-                "base_candidates": API_BASE_CANDIDATES,
-                "redirect_uri": REDIRECT_URI,
-                "client_id_present": bool(CLIENT_ID),
-                "client_secret_present": bool(CLIENT_SECRET),
-                "username_present": bool(USERNAME),
-                "password_present": bool(PASSWORD),
+                "type": type(e).__name__,
             },
-        },
-    )
-
+        )
 
 def ensure_token() -> Tuple[str, str]:
     tok = load_token()
