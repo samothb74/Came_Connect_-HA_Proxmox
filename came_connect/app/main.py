@@ -19,7 +19,7 @@ PASSWORD = os.getenv("CAME_CONNECT_PASSWORD", "")
 
 # Base API pour les commandes/statuts
 API_BASE_CANDIDATES = [
-    "https://app.cameconnect.net/api/evo/v1",
+    "https://app.cameconnect.net/api",
 ]
 
 # Endpoint OAuth (auth.cameconnect.net) – pris du custom component
