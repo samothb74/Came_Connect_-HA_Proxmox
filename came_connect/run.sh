@@ -23,3 +23,9 @@ echo "Listing /app/app:"
 ls -la /app/app
 
 exec /opt/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 9002
+
+bashio::log.info "CLIENT_ID set: $([ -n "$CLIENT_ID" ] && echo yes || echo no)"
+bashio::log.info "CLIENT_SECRET set: $([ -n "$CLIENT_SECRET" ] && echo yes || echo no)"
+bashio::log.info "USERNAME set: $([ -n "$USERNAME" ] && echo yes || echo no)"
+bashio::log.info "PASSWORD set: $([ -n "$PASSWORD" ] && echo yes || echo no)"
+bashio::log.info "DEVICE_ID set: $([ -n "$DEVICE_ID" ] && echo yes || echo no)"
