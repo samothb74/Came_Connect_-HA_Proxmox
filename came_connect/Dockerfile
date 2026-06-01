@@ -13,5 +13,6 @@ COPY . /app
 RUN chmod a+x /app/run.sh
 
 ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONPATH="/app"
 
 CMD ["/app/run.sh"]
