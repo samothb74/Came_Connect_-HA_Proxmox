@@ -1,6 +1,6 @@
 name: "Came Connect - Proxmox edition"
 description: "Local REST proxy for CAME Connect on x86 arch"
-version: "1.3.4"
+version: "1.3.5"
 slug: "came_connect"
 startup: services
 boot: auto
