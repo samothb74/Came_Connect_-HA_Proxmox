@@ -116,9 +116,9 @@ def fetch_token() -> Dict[str, Any]:
                 save_token(tok)
                 return tok
         except Exception as e:
-            last_err = f"{base} exception: {e}"
+            errors.append(f"{base} exception: {e}")
 
-    raise HTTPException(status_code=502, detail=f"OAuth failed: {last_err}")
+    raise HTTPException(status_code=502, detail={"message": "OAuth failed", "errors": errors})
 
 def ensure_token() -> Tuple[str, str]:
     tok = load_token()
