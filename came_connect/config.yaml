@@ -1,7 +1,7 @@
-name: "Came Connect Proxy"
-version: "1.3.0"
-slug: "came_connect_proxy"
-description: "Local REST proxy for CAME Connect with PKCE auth"
+name: "Came Connect - Proxmox edition"
+description: "Local REST proxy for CAME Connect on x86 arch"
+version: "1.3.4"
+slug: "came_connect"
 startup: services
 boot: auto
 init: false
