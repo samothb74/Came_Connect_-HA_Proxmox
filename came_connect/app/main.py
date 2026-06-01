@@ -38,15 +38,11 @@ app = FastAPI(title="Came Connect Proxy", version="0.2.1")
 
 
 # ---- Utility ----
-@@ -39,7 +41,7 @@
-
-
 def _pkce_pair() -> Tuple[str, str]:
     verifier = _b64url(secrets.token_bytes(32)).replace("-", "").replace("_", "")
     challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
     return verifier, challenge
 
-@@ -69,69 +71,25 @@
     return bool(tok and tok.get("access_token"))
 
 
@@ -102,13 +98,6 @@ def fetch_token() -> Dict[str, Any]:
         save_token(tok)
         return tok
 
-
-
-
-
-
-
-
     except HTTPException:
         raise
     except Exception as e:
@@ -123,7 +112,6 @@ def fetch_token() -> Dict[str, Any]:
 
 def ensure_token() -> Tuple[str, str]:
     tok = load_token()
-@@ -150,15 +108,6 @@
         else:
             r = s.get(url, headers=headers)
 
@@ -138,6 +126,4 @@ def ensure_token() -> Tuple[str, str]:
 
     return r
 
-
-@@ -229,10 +178,110 @@
         return None
