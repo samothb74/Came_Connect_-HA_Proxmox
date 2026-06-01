@@ -19,5 +19,7 @@ export PYTHONPATH=/app
 echo "PWD=$(pwd)"
 echo "Listing /app:"
 ls -la /app
+echo "Listing /app/app:"
+ls -la /app/app
 
 exec /opt/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 9002
