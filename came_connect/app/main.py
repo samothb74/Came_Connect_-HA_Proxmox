@@ -16,13 +16,17 @@ CLIENT_SECRET = os.getenv("CAME_CONNECT_CLIENT_SECRET", "")
 USERNAME = os.getenv("CAME_CONNECT_USERNAME", "")
 PASSWORD = os.getenv("CAME_CONNECT_PASSWORD", "")
 
+# Base API pour les commandes/statuts
 API_BASE_CANDIDATES = [
-    "https://app.cameconnect.net/api",
+    "https://app.cameconnect.net/api/evo/v1",
 ]
 
+# Endpoint OAuth (auth.cameconnect.net) – pris du custom component
+AUTH_BASE = "https://auth.cameconnect.net/oauth/token"
+
+# URI de redirection tel que documenté dans sdeagh
 REDIRECT_URI = "https://app.cameconnect.net/role"
-OAUTH_AUTH_CODE_SUFFIX = "/oauth/auth-code"
-OAUTH_TOKEN_SUFFIX = "/oauth/token"
+
 TOKEN_PATH = "/data/token.json"
 HTTP_TIMEOUT = 30.0
 
