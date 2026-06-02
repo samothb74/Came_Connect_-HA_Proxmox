@@ -17,5 +17,5 @@ bashio::log.info "DEVICE_ID set: $( [ -n "$CAME_CONNECT_DEVICE_ID" ] && echo yes
 cd /app
 export PYTHONPATH=/app
 
-python3 -m py_compile /app/main.py 
+python3 -m py_compile /app/app/main.py 
 exec uvicorn app.main:app --host 0.0.0.0 --port 9002
