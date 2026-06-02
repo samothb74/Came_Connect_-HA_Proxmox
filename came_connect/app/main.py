@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import secrets
+import string
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -12,7 +13,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="CAME Connect API bridge", version="2.2.0")
+app = FastAPI(title="CAME Connect API bridge", version="2.2.1")
 
 CLIENT_ID = os.getenv("CAME_CONNECT_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CAME_CONNECT_CLIENT_SECRET", "")
@@ -41,8 +42,13 @@ def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
 
+def _rand_lower_alnum(length: int) -> str:
+    alphabet = string.ascii_lowercase + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
 def _pkce_pair() -> Tuple[str, str]:
-    code_verifier = _b64url(secrets.token_bytes(64))
+    code_verifier = _rand_lower_alnum(64)
     code_challenge = _b64url(hashlib.sha256(code_verifier.encode("ascii")).digest())
     return code_verifier, code_challenge
 
@@ -124,8 +130,8 @@ def start_auth_flow() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Missing CAME_CONNECT_PASSWORD")
 
     code_verifier, code_challenge = _pkce_pair()
-    state = secrets.token_urlsafe(48)
-    nonce = secrets.token_urlsafe(48)
+    state = _rand_lower_alnum(128)
+    nonce = _rand_lower_alnum(128)
 
     flow = {
         "state": state,
@@ -307,7 +313,11 @@ def _auth_headers(access_token: str) -> Dict[str, str]:
     return headers
 
 
-def _request_with_refresh(method: str, url: str, payload: Optional[Dict[str, Any]] = None) -> httpx.Response:
+def _request_with_refresh(
+    method: str,
+    url: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> httpx.Response:
     tok = ensure_token()
     headers = _auth_headers(tok["access_token"])
 
