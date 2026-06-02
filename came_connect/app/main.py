@@ -396,22 +396,39 @@ def _fetch_device_states(device_id: str) -> Any:
         f"{API_BASE}/device/{device_id}/status",
     ]
 
-    last_response = None
+    attempts = []
+
     for url in candidates:
-        r = _request_with_refresh("GET", url)
-        last_response = r
-        if r.status_code == 200:
-            return r.json()
+        try:
+            r = _request_with_refresh("GET", url)
+            attempts.append({
+                "url": url,
+                "status": r.status_code,
+                "content_type": r.headers.get("content-type"),
+                "body": r.text[:800],
+            })
+            if r.status_code == 200:
+                try:
+                    return r.json()
+                except Exception:
+                    return {
+                        "ok": False,
+                        "message": "Endpoint returned 200 but not valid JSON",
+                        "url": url,
+                        "body": r.text[:1200],
+                        "attempts": attempts,
+                    }
+        except Exception as exc:
+            attempts.append({
+                "url": url,
+                "exception": repr(exc),
+            })
 
-    raise HTTPException(
-        status_code=502,
-        detail={
-            "message": "Failed to fetch device states",
-            "status": last_response.status_code if last_response else None,
-            "body": last_response.text[:1200] if last_response else None,
-        },
-    )
-
+    return {
+        "ok": False,
+        "message": "Failed to fetch device states from all candidate endpoints",
+        "attempts": attempts,
+    }
 
 def _try_command_requests(device_id: str, command: str) -> Dict[str, Any]:
     payloads = [
