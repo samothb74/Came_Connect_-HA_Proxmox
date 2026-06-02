@@ -361,7 +361,7 @@ def _request_with_refresh(
 
     with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True) as s:
         if method.upper() == "POST":
-            r = s.post(url, headers=headers, json=payload)
+            r = s.post(url, headers=headers) if payload is None else s.post(url, headers=headers, json=payload)
         else:
             r = s.get(url, headers=headers)
 
@@ -375,7 +375,7 @@ def _request_with_refresh(
     headers = _auth_headers(refreshed["access_token"])
     with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True) as s:
         if method.upper() == "POST":
-            return s.post(url, headers=headers, json=payload)
+            return s.post(url, headers=headers) if payload is None else s.post(url, headers=headers, json=payload)
         return s.get(url, headers=headers)
 
 
@@ -438,41 +438,62 @@ def _fetch_device_states(device_id: str) -> Any:
         "attempts": attempts,
     }
 
+def _command_code(command: str) -> int:
+    mapping = {
+        "open": 2,
+        "close": 5,
+        "stop": 129,
+    }
+    if command not in mapping:
+        raise HTTPException(status_code=400, detail=f"Unsupported command: {command}")
+    return mapping[command]
+
+
 def _try_command_requests(device_id: str, command: str) -> Dict[str, Any]:
-    payloads = [
-        {"command": command},
-        {"action": command},
-        {"name": command},
-        {"maneuver": command},
-    ]
+    code = _command_code(command)
 
     urls = [
-        f"{API_BASE}/devices/{device_id}/commands",
-        f"{API_BASE}/devices/{device_id}/command",
-        f"{API_BASE}/device/{device_id}/commands",
-        f"{API_BASE}/device/{device_id}/command",
+        f"{API_BASE}/devices/{device_id}/command/{code}",
+        f"{API_BASE}/device/{device_id}/command/{code}",
+        f"{API_BASE}/devices/{device_id}/commands/{code}",
+        f"{API_BASE}/device/{device_id}/commands/{code}",
     ]
 
     attempts = []
     for url in urls:
-        for payload in payloads:
-            r = _request_with_refresh("POST", url, payload)
-            attempts.append(
-                {
-                    "url": url,
-                    "payload": payload,
-                    "status": r.status_code,
-                    "body": r.text[:500],
-                }
-            )
+        try:
+            r = _request_with_refresh("POST", url, payload=None)
+            attempts.append({
+                "url": url,
+                "status": r.status_code,
+                "content_type": r.headers.get("content-type"),
+                "body": r.text[:500],
+            })
+
             if r.status_code in (200, 201, 202, 204):
                 try:
-                    body = r.json()
+                    body = r.json() if (r.text or "").strip() else {}
                 except Exception:
                     body = {"raw": r.text[:500]}
-                return {"ok": True, "result": body, "attempts": attempts}
+                return {
+                    "ok": True,
+                    "command": command,
+                    "code": code,
+                    "result": body,
+                    "attempts": attempts,
+                }
+        except Exception as exc:
+            attempts.append({
+                "url": url,
+                "exception": repr(exc),
+            })
 
-    raise HTTPException(status_code=502, detail={"message": "All command attempts failed", "attempts": attempts})
+    return {
+        "ok": False,
+        "command": command,
+        "code": code,
+        "attempts": attempts,
+    }
 
 
 @app.get("/health")
