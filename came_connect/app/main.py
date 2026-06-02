@@ -13,7 +13,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="CAME Connect API bridge", version="2.2.1")
+app = FastAPI(title="CAME Connect API bridge", version="2.3.0")
 
 CLIENT_ID = os.getenv("CAME_CONNECT_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CAME_CONNECT_CLIENT_SECRET", "")
@@ -119,6 +119,124 @@ def _came_browser_like_headers() -> Dict[str, str]:
     return headers
 
 
+def exchange_code_for_token(code: str, state: str) -> Dict[str, Any]:
+    if not CLIENT_ID:
+        raise HTTPException(status_code=500, detail="Missing CAME_CONNECT_CLIENT_ID")
+
+    flow = load_flow()
+    if not flow:
+        raise HTTPException(status_code=400, detail="No OAuth flow in progress")
+
+    expected_state = flow.get("state")
+    code_verifier = flow.get("code_verifier")
+    redirect_uri = flow.get("redirect_uri", REDIRECT_URI)
+
+    if not expected_state or not code_verifier:
+        raise HTTPException(status_code=400, detail="Stored OAuth flow is incomplete")
+
+    if state != expected_state:
+        raise HTTPException(status_code=400, detail="Invalid OAuth state")
+
+    headers = _came_browser_like_headers()
+    data = {
+        "grant_type": "authorization_code",
+        "client_id": CLIENT_ID,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "code_verifier": code_verifier,
+    }
+
+    with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False) as s:
+        r = s.post(TOKEN_URL, data=data, headers=headers)
+
+    if r.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "OAuth token exchange failed",
+                "status": r.status_code,
+                "headers": dict(r.headers),
+                "body": r.text[:1500],
+            },
+        )
+
+    try:
+        tok = r.json()
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Token endpoint did not return valid JSON",
+                "status": r.status_code,
+                "body": r.text[:1500],
+            },
+        )
+
+    tok = _normalize_token_payload(tok)
+    tok["_token_url"] = TOKEN_URL
+    tok["_redirect_uri"] = redirect_uri
+    tok["_auth_mode"] = "authorization_code_pkce"
+    save_token(tok)
+
+    return {
+        "ok": True,
+        "auth_mode": "authorization_code_pkce",
+        "expires_at": tok.get("expires_at"),
+        "has_access_token": bool(tok.get("access_token")),
+        "has_refresh_token": bool(tok.get("refresh_token")),
+    }
+
+
+def refresh_token_if_possible(tok: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    refresh_token = tok.get("refresh_token")
+    if not refresh_token:
+        return None
+
+    headers = _came_browser_like_headers()
+    data = {
+        "grant_type": "refresh_token",
+        "client_id": CLIENT_ID,
+        "refresh_token": refresh_token,
+    }
+
+    with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False) as s:
+        r = s.post(TOKEN_URL, data=data, headers=headers)
+
+    if r.status_code != 200:
+        return None
+
+    try:
+        new_tok = r.json()
+    except Exception:
+        return None
+
+    new_tok = _normalize_token_payload(new_tok)
+    new_tok["_token_url"] = TOKEN_URL
+    new_tok["_redirect_uri"] = tok.get("_redirect_uri", REDIRECT_URI)
+    new_tok["_auth_mode"] = "authorization_code_pkce"
+    save_token(new_tok)
+    return new_tok
+
+
+def ensure_token() -> Dict[str, Any]:
+    tok = load_token()
+
+    if token_valid(tok):
+        return tok
+
+    refreshed = refresh_token_if_possible(tok)
+    if refreshed and token_valid(refreshed):
+        return refreshed
+
+    raise HTTPException(
+        status_code=401,
+        detail={
+            "message": "No valid token available",
+            "action": "Run /auth/start to authenticate again",
+        },
+    )
+
+
 def start_auth_flow() -> Dict[str, Any]:
     if not CLIENT_ID:
         raise HTTPException(status_code=500, detail="Missing CAME_CONNECT_CLIENT_ID")
@@ -167,15 +285,12 @@ def start_auth_flow() -> Dict[str, Any]:
     with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False) as s:
         r = s.post(url, data=body, headers=headers)
 
-    location = r.headers.get("location")
-    set_cookie = r.headers.get("set-cookie")
-
-    result = {
+    base_result = {
         "status_code": r.status_code,
         "state": state,
         "redirect_uri": REDIRECT_URI,
-        "location": location,
-        "set_cookie_present": bool(set_cookie),
+        "location": r.headers.get("location"),
+        "set_cookie_present": bool(r.headers.get("set-cookie")),
         "headers": dict(r.headers),
         "body_preview": r.text[:2000],
         "request_url": url,
@@ -187,120 +302,43 @@ def start_auth_flow() -> Dict[str, Any]:
         },
     }
 
-    if r.status_code in (301, 302, 303, 307, 308):
-        result["next_step"] = (
-            "Open the URL in 'location'. If it redirects to cameconnect.net/role with "
-            "code=...&state=..., call /auth/exchange with those values."
-        )
-    elif r.status_code == 200:
-        result["next_step"] = (
-            "Inspect body_preview/headers. CAME may be returning HTML, JSON, or MFA content."
-        )
-    else:
-        result["next_step"] = "Auth init failed; inspect status_code, headers and body_preview."
-
-    return result
-
-
-def exchange_code_for_token(code: str, state: str) -> Dict[str, Any]:
-    if not CLIENT_ID:
-        raise HTTPException(status_code=500, detail="Missing CAME_CONNECT_CLIENT_ID")
-
-    flow = load_flow()
-    if not flow:
-        raise HTTPException(status_code=400, detail="No OAuth flow in progress")
-
-    expected_state = flow.get("state")
-    code_verifier = flow.get("code_verifier")
-    redirect_uri = flow.get("redirect_uri", REDIRECT_URI)
-
-    if not expected_state or not code_verifier:
-        raise HTTPException(status_code=400, detail="Stored OAuth flow is incomplete")
-
-    if state != expected_state:
-        raise HTTPException(status_code=400, detail="Invalid OAuth state")
-
-    headers = _came_browser_like_headers()
-
-    data = {
-        "grant_type": "authorization_code",
-        "client_id": CLIENT_ID,
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "code_verifier": code_verifier,
-    }
-
-    with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False) as s:
-        r = s.post(TOKEN_URL, data=data, headers=headers)
-
     if r.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "message": "OAuth token exchange failed",
-                "status": r.status_code,
-                "headers": dict(r.headers),
-                "body": r.text[:1500],
-            },
-        )
+        base_result["next_step"] = "Auth init failed; inspect status_code, headers and body_preview."
+        return base_result
 
-    tok = _normalize_token_payload(r.json())
-    tok["_token_url"] = TOKEN_URL
-    tok["_redirect_uri"] = redirect_uri
-    tok["_auth_mode"] = "authorization_code_pkce"
-    save_token(tok)
+    try:
+        response_json = r.json()
+    except Exception:
+        base_result["next_step"] = "Auth init returned non-JSON content."
+        return base_result
+
+    returned_code = response_json.get("code")
+    returned_state = response_json.get("state")
+
+    if not returned_code:
+        base_result["response_json"] = response_json
+        base_result["next_step"] = "No authorization code returned by CAME."
+        return base_result
+
+    if returned_state != state:
+        base_result["response_json"] = response_json
+        base_result["next_step"] = "Returned state does not match stored state."
+        return base_result
+
+    token_result = exchange_code_for_token(returned_code, returned_state)
 
     return {
-        "ok": True,
-        "auth_mode": "authorization_code_pkce",
-        "expires_at": tok.get("expires_at"),
-        "has_refresh_token": bool(tok.get("refresh_token")),
-    }
-
-
-def refresh_token_if_possible(tok: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    refresh_token = tok.get("refresh_token")
-    if not refresh_token:
-        return None
-
-    headers = _came_browser_like_headers()
-    data = {
-        "grant_type": "refresh_token",
-        "client_id": CLIENT_ID,
-        "refresh_token": refresh_token,
-    }
-
-    with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False) as s:
-        r = s.post(TOKEN_URL, data=data, headers=headers)
-
-    if r.status_code != 200:
-        return None
-
-    new_tok = _normalize_token_payload(r.json())
-    new_tok["_token_url"] = TOKEN_URL
-    new_tok["_redirect_uri"] = tok.get("_redirect_uri", REDIRECT_URI)
-    new_tok["_auth_mode"] = "authorization_code_pkce"
-    save_token(new_tok)
-    return new_tok
-
-
-def ensure_token() -> Dict[str, Any]:
-    tok = load_token()
-
-    if token_valid(tok):
-        return tok
-
-    refreshed = refresh_token_if_possible(tok)
-    if refreshed and token_valid(refreshed):
-        return refreshed
-
-    raise HTTPException(
-        status_code=401,
-        detail={
-            "message": "No valid token available",
-            "action": "Start a new login with /auth/start, then complete /auth/exchange",
+        "status_code": r.status_code,
+        "auth_code_received": True,
+        "state": state,
+        "response_json": {
+            "code": returned_code[:12] + "...masked...",
+            "scope": response_json.get("scope"),
+            "state": returned_state,
         },
-    )
+        "token_result": token_result,
+        "next_step": "Authentication completed successfully.",
+    }
 
 
 def _auth_headers(access_token: str) -> Dict[str, str]:
@@ -440,8 +478,8 @@ def auth_start() -> Dict[str, Any]:
 
 @app.get("/auth/exchange")
 def auth_exchange(
-    code: str = Query(..., description="Authorization code returned by CAME redirect"),
-    state: str = Query(..., description="State returned by CAME redirect"),
+    code: str = Query(..., description="Authorization code returned by CAME"),
+    state: str = Query(..., description="State returned by CAME"),
 ) -> Dict[str, Any]:
     return exchange_code_for_token(code, state)
 
