@@ -6,12 +6,13 @@ import secrets
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="CAME Connect API bridge", version="2.0.0")
+app = FastAPI(title="CAME Connect API bridge", version="2.0.1")
 
 CLIENT_ID = os.getenv("CAME_CONNECT_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CAME_CONNECT_CLIENT_SECRET", "")
@@ -40,8 +41,7 @@ def _b64url(data: bytes) -> str:
 
 def _pkce_pair() -> Tuple[str, str]:
     code_verifier = _b64url(secrets.token_bytes(64))
-    challenge = hashlib.sha256(code_verifier.encode("ascii")).digest()
-    code_challenge = _b64url(challenge)
+    code_challenge = _b64url(hashlib.sha256(code_verifier.encode("ascii")).digest())
     return code_verifier, code_challenge
 
 
@@ -123,7 +123,8 @@ def build_auth_url() -> Dict[str, str]:
         "code_challenge_method": "S256",
     }
 
-    url = str(httpx.URL(AUTH_URL).copy_add_params(params))
+    url = f"{AUTH_URL}?{urlencode(params)}"
+
     return {
         "auth_url": url,
         "state": state,
@@ -137,6 +138,9 @@ def build_auth_url() -> Dict[str, str]:
 
 
 def exchange_code_for_token(code: str, state: str) -> Dict[str, Any]:
+    if not CLIENT_ID:
+        raise HTTPException(status_code=500, detail="Missing CAME_CONNECT_CLIENT_ID")
+
     flow = load_flow()
     if not flow:
         raise HTTPException(status_code=400, detail="No OAuth flow in progress")
@@ -195,6 +199,9 @@ def exchange_code_for_token(code: str, state: str) -> Dict[str, Any]:
 
 
 def refresh_token_if_possible(tok: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not CLIENT_ID:
+        return None
+
     refresh_token = tok.get("refresh_token")
     if not refresh_token:
         return None
@@ -203,6 +210,7 @@ def refresh_token_if_possible(tok: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         "Accept": "application/json",
     }
+
     data = {
         "grant_type": "refresh_token",
         "client_id": CLIENT_ID,
@@ -255,7 +263,11 @@ def _auth_headers(access_token: str) -> Dict[str, str]:
     return headers
 
 
-def _request_with_refresh(method: str, url: str, payload: Optional[Dict[str, Any]] = None) -> httpx.Response:
+def _request_with_refresh(
+    method: str,
+    url: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> httpx.Response:
     tok = ensure_token()
     headers = _auth_headers(tok["access_token"])
 
@@ -280,14 +292,26 @@ def _request_with_refresh(method: str, url: str, payload: Optional[Dict[str, Any
 
 
 def _fetch_devices() -> Any:
-    url = f"{API_BASE}/devices"
-    r = _request_with_refresh("GET", url)
-    if r.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail={"message": "Failed to fetch devices", "status": r.status_code, "body": r.text[:1200]},
-        )
-    return r.json()
+    candidates = [
+        f"{API_BASE}/devices",
+        f"{API_BASE}/device",
+    ]
+
+    last_response = None
+    for url in candidates:
+        r = _request_with_refresh("GET", url)
+        last_response = r
+        if r.status_code == 200:
+            return r.json()
+
+    raise HTTPException(
+        status_code=502,
+        detail={
+            "message": "Failed to fetch devices",
+            "status": last_response.status_code if last_response else None,
+            "body": last_response.text[:1200] if last_response else None,
+        },
+    )
 
 
 def _fetch_device_states(device_id: str) -> Any:
@@ -295,6 +319,7 @@ def _fetch_device_states(device_id: str) -> Any:
         f"{API_BASE}/devices/{device_id}/states",
         f"{API_BASE}/devices/{device_id}/status",
         f"{API_BASE}/device/{device_id}/states",
+        f"{API_BASE}/device/{device_id}/status",
     ]
 
     last_response = None
@@ -326,6 +351,7 @@ def _try_command_requests(device_id: str, command: str) -> Dict[str, Any]:
         f"{API_BASE}/devices/{device_id}/commands",
         f"{API_BASE}/devices/{device_id}/command",
         f"{API_BASE}/device/{device_id}/commands",
+        f"{API_BASE}/device/{device_id}/command",
     ]
 
     attempts = []
@@ -347,7 +373,10 @@ def _try_command_requests(device_id: str, command: str) -> Dict[str, Any]:
                     body = {"raw": r.text[:500]}
                 return {"ok": True, "result": body, "attempts": attempts}
 
-    raise HTTPException(status_code=502, detail={"message": "All command attempts failed", "attempts": attempts})
+    raise HTTPException(
+        status_code=502,
+        detail={"message": "All command attempts failed", "attempts": attempts},
+    )
 
 
 @app.get("/health")
