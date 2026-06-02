@@ -6,13 +6,12 @@ import secrets
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
-from urllib.parse import urlencode
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="CAME Connect API bridge", version="2.0.1")
+app = FastAPI(title="CAME Connect API bridge", version="2.1.0")
 
 CLIENT_ID = os.getenv("CAME_CONNECT_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CAME_CONNECT_CLIENT_SECRET", "")
@@ -94,9 +93,28 @@ def _normalize_token_payload(tok: Dict[str, Any]) -> Dict[str, Any]:
     return tok
 
 
-def build_auth_url() -> Dict[str, str]:
+def _came_browser_like_headers() -> Dict[str, str]:
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Origin": "https://cameconnect.net",
+        "Referer": "https://cameconnect.net/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0"
+        ),
+    }
+    if CLIENT_SECRET:
+        headers["Authorization"] = _basic_auth(CLIENT_ID, CLIENT_SECRET)
+    return headers
+
+
+def start_auth_flow() -> Dict[str, Any]:
     if not CLIENT_ID:
         raise HTTPException(status_code=500, detail="Missing CAME_CONNECT_CLIENT_ID")
+    if not CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="Missing CAME_CONNECT_CLIENT_SECRET")
 
     code_verifier, code_challenge = _pkce_pair()
     state = secrets.token_urlsafe(48)
@@ -113,7 +131,7 @@ def build_auth_url() -> Dict[str, str]:
     }
     save_flow(flow)
 
-    params = {
+    data = {
         "client_id": CLIENT_ID,
         "response_type": "code",
         "redirect_uri": REDIRECT_URI,
@@ -123,18 +141,37 @@ def build_auth_url() -> Dict[str, str]:
         "code_challenge_method": "S256",
     }
 
-    url = f"{AUTH_URL}?{urlencode(params)}"
+    headers = _came_browser_like_headers()
 
-    return {
-        "auth_url": url,
+    with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False) as s:
+        r = s.post(AUTH_URL, data=data, headers=headers)
+
+    location = r.headers.get("location")
+    set_cookie = r.headers.get("set-cookie")
+
+    result = {
+        "status_code": r.status_code,
         "state": state,
         "redirect_uri": REDIRECT_URI,
-        "instructions": (
-            "Open auth_url in a browser, log in to CAME Connect, "
-            "then capture the final redirected URL and extract the 'code' parameter. "
-            "Call /auth/exchange?code=...&state=... to complete authentication."
-        ),
+        "location": location,
+        "set_cookie_present": bool(set_cookie),
+        "headers": dict(r.headers),
+        "body_preview": r.text[:2000],
     }
+
+    if r.status_code in (301, 302, 303, 307, 308):
+        result["next_step"] = (
+            "Open the URL in 'location'. If it redirects to cameconnect.net/role with "
+            "code=...&state=..., call /auth/exchange with those values."
+        )
+    elif r.status_code == 200:
+        result["next_step"] = (
+            "Inspect body_preview/headers. CAME may be returning HTML or JSON for the next auth step."
+        )
+    else:
+        result["next_step"] = "Auth init failed; inspect status_code, headers and body_preview."
+
+    return result
 
 
 def exchange_code_for_token(code: str, state: str) -> Dict[str, Any]:
@@ -156,8 +193,15 @@ def exchange_code_for_token(code: str, state: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
     headers = {
-        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-        "Accept": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Origin": "https://cameconnect.net",
+        "Referer": "https://cameconnect.net/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0"
+        ),
     }
 
     data = {
@@ -171,7 +215,7 @@ def exchange_code_for_token(code: str, state: str) -> Dict[str, Any]:
     if CLIENT_SECRET:
         headers["Authorization"] = _basic_auth(CLIENT_ID, CLIENT_SECRET)
 
-    with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True) as s:
+    with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False) as s:
         r = s.post(TOKEN_URL, data=data, headers=headers)
 
     if r.status_code != 200:
@@ -180,6 +224,7 @@ def exchange_code_for_token(code: str, state: str) -> Dict[str, Any]:
             detail={
                 "message": "OAuth token exchange failed",
                 "status": r.status_code,
+                "headers": dict(r.headers),
                 "body": r.text[:1500],
             },
         )
@@ -207,8 +252,15 @@ def refresh_token_if_possible(tok: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
     headers = {
-        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-        "Accept": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Origin": "https://cameconnect.net",
+        "Referer": "https://cameconnect.net/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0"
+        ),
     }
 
     data = {
@@ -220,7 +272,7 @@ def refresh_token_if_possible(tok: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if CLIENT_SECRET:
         headers["Authorization"] = _basic_auth(CLIENT_ID, CLIENT_SECRET)
 
-    with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True) as s:
+    with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False) as s:
         r = s.post(TOKEN_URL, data=data, headers=headers)
 
     if r.status_code != 200:
@@ -399,8 +451,8 @@ def health() -> Dict[str, Any]:
 
 
 @app.get("/auth/start")
-def auth_start() -> Dict[str, str]:
-    return build_auth_url()
+def auth_start() -> Dict[str, Any]:
+    return start_auth_flow()
 
 
 @app.get("/auth/exchange")
