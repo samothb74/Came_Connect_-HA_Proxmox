@@ -6,15 +6,18 @@ import secrets
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="CAME Connect API bridge", version="2.1.0")
+app = FastAPI(title="CAME Connect API bridge", version="2.2.0")
 
 CLIENT_ID = os.getenv("CAME_CONNECT_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CAME_CONNECT_CLIENT_SECRET", "")
+USERNAME = os.getenv("CAME_CONNECT_USERNAME", "")
+PASSWORD = os.getenv("CAME_CONNECT_PASSWORD", "")
 DEVICE_ID = os.getenv("CAME_CONNECT_DEVICE_ID", "")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
@@ -115,6 +118,10 @@ def start_auth_flow() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Missing CAME_CONNECT_CLIENT_ID")
     if not CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="Missing CAME_CONNECT_CLIENT_SECRET")
+    if not USERNAME:
+        raise HTTPException(status_code=500, detail="Missing CAME_CONNECT_USERNAME")
+    if not PASSWORD:
+        raise HTTPException(status_code=500, detail="Missing CAME_CONNECT_PASSWORD")
 
     code_verifier, code_challenge = _pkce_pair()
     state = secrets.token_urlsafe(48)
@@ -131,7 +138,7 @@ def start_auth_flow() -> Dict[str, Any]:
     }
     save_flow(flow)
 
-    data = {
+    query_params = {
         "client_id": CLIENT_ID,
         "response_type": "code",
         "redirect_uri": REDIRECT_URI,
@@ -141,10 +148,18 @@ def start_auth_flow() -> Dict[str, Any]:
         "code_challenge_method": "S256",
     }
 
+    body = {
+        "grant_type": "authorization_code",
+        "username": USERNAME,
+        "password": PASSWORD,
+        "client_id": CLIENT_ID,
+    }
+
+    url = f"{AUTH_URL}?{urlencode(query_params)}"
     headers = _came_browser_like_headers()
 
     with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False) as s:
-        r = s.post(AUTH_URL, data=data, headers=headers)
+        r = s.post(url, data=body, headers=headers)
 
     location = r.headers.get("location")
     set_cookie = r.headers.get("set-cookie")
@@ -157,6 +172,13 @@ def start_auth_flow() -> Dict[str, Any]:
         "set_cookie_present": bool(set_cookie),
         "headers": dict(r.headers),
         "body_preview": r.text[:2000],
+        "request_url": url,
+        "request_body_preview": {
+            "grant_type": "authorization_code",
+            "username": USERNAME,
+            "password": "***masked***",
+            "client_id": CLIENT_ID,
+        },
     }
 
     if r.status_code in (301, 302, 303, 307, 308):
@@ -166,7 +188,7 @@ def start_auth_flow() -> Dict[str, Any]:
         )
     elif r.status_code == 200:
         result["next_step"] = (
-            "Inspect body_preview/headers. CAME may be returning HTML or JSON for the next auth step."
+            "Inspect body_preview/headers. CAME may be returning HTML, JSON, or MFA content."
         )
     else:
         result["next_step"] = "Auth init failed; inspect status_code, headers and body_preview."
@@ -192,17 +214,7 @@ def exchange_code_for_token(code: str, state: str) -> Dict[str, Any]:
     if state != expected_state:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
-    headers = {
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Origin": "https://cameconnect.net",
-        "Referer": "https://cameconnect.net/",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0"
-        ),
-    }
+    headers = _came_browser_like_headers()
 
     data = {
         "grant_type": "authorization_code",
@@ -211,9 +223,6 @@ def exchange_code_for_token(code: str, state: str) -> Dict[str, Any]:
         "redirect_uri": redirect_uri,
         "code_verifier": code_verifier,
     }
-
-    if CLIENT_SECRET:
-        headers["Authorization"] = _basic_auth(CLIENT_ID, CLIENT_SECRET)
 
     with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False) as s:
         r = s.post(TOKEN_URL, data=data, headers=headers)
@@ -244,33 +253,16 @@ def exchange_code_for_token(code: str, state: str) -> Dict[str, Any]:
 
 
 def refresh_token_if_possible(tok: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    if not CLIENT_ID:
-        return None
-
     refresh_token = tok.get("refresh_token")
     if not refresh_token:
         return None
 
-    headers = {
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Origin": "https://cameconnect.net",
-        "Referer": "https://cameconnect.net/",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0"
-        ),
-    }
-
+    headers = _came_browser_like_headers()
     data = {
         "grant_type": "refresh_token",
         "client_id": CLIENT_ID,
         "refresh_token": refresh_token,
     }
-
-    if CLIENT_SECRET:
-        headers["Authorization"] = _basic_auth(CLIENT_ID, CLIENT_SECRET)
 
     with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False) as s:
         r = s.post(TOKEN_URL, data=data, headers=headers)
@@ -315,11 +307,7 @@ def _auth_headers(access_token: str) -> Dict[str, str]:
     return headers
 
 
-def _request_with_refresh(
-    method: str,
-    url: str,
-    payload: Optional[Dict[str, Any]] = None,
-) -> httpx.Response:
+def _request_with_refresh(method: str, url: str, payload: Optional[Dict[str, Any]] = None) -> httpx.Response:
     tok = ensure_token()
     headers = _auth_headers(tok["access_token"])
 
@@ -344,26 +332,12 @@ def _request_with_refresh(
 
 
 def _fetch_devices() -> Any:
-    candidates = [
-        f"{API_BASE}/devices",
-        f"{API_BASE}/device",
-    ]
-
-    last_response = None
-    for url in candidates:
+    for url in (f"{API_BASE}/devices", f"{API_BASE}/device"):
         r = _request_with_refresh("GET", url)
-        last_response = r
         if r.status_code == 200:
             return r.json()
 
-    raise HTTPException(
-        status_code=502,
-        detail={
-            "message": "Failed to fetch devices",
-            "status": last_response.status_code if last_response else None,
-            "body": last_response.text[:1200] if last_response else None,
-        },
-    )
+    raise HTTPException(status_code=502, detail="Failed to fetch devices")
 
 
 def _fetch_device_states(device_id: str) -> Any:
@@ -425,10 +399,7 @@ def _try_command_requests(device_id: str, command: str) -> Dict[str, Any]:
                     body = {"raw": r.text[:500]}
                 return {"ok": True, "result": body, "attempts": attempts}
 
-    raise HTTPException(
-        status_code=502,
-        detail={"message": "All command attempts failed", "attempts": attempts},
-    )
+    raise HTTPException(status_code=502, detail={"message": "All command attempts failed", "attempts": attempts})
 
 
 @app.get("/health")
@@ -439,6 +410,8 @@ def health() -> Dict[str, Any]:
         "ok": True,
         "client_id_set": bool(CLIENT_ID),
         "client_secret_set": bool(CLIENT_SECRET),
+        "username_set": bool(USERNAME),
+        "password_set": bool(PASSWORD),
         "device_id_set": bool(DEVICE_ID),
         "public_base_url_set": bool(PUBLIC_BASE_URL),
         "token_present": bool(tok.get("access_token")),
